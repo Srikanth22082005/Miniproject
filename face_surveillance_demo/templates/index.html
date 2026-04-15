@@ -1,0 +1,321 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Real-time Face Surveillance Dashboard — SCRFD + ArcFace + ByteTrack + FAISS">
+    <title>Face Surveillance Dashboard</title>
+    <link rel="stylesheet" href="/static/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🎯</text></svg>">
+</head>
+<body>
+    <div class="app-container">
+
+        <!-- ─── Header ─────────────────────────────────────── -->
+        <header class="app-header">
+            <div class="header-left">
+                <div class="header-logo">🎯</div>
+                <div class="header-title">
+                    <h1>Face Surveillance System</h1>
+                    <p>SCRFD · ArcFace · ByteTrack · FAISS · SQLite</p>
+                </div>
+            </div>
+            <div class="header-right">
+                <div class="status-badge" id="statusBadge">
+                    <span class="status-dot"></span>
+                    <span id="statusText">LIVE</span>
+                </div>
+                <button class="btn" id="btnRefresh" data-tooltip="Refresh logs">
+                    🔄 Refresh
+                </button>
+                <button class="btn btn-danger" id="btnClear" data-tooltip="Clear all logs">
+                    🗑️ Clear
+                </button>
+            </div>
+        </header>
+
+        <!-- ─── Stats Grid ─────────────────────────────────── -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon">📊</div>
+                <div class="stat-content">
+                    <div class="stat-value" id="statTotal">0</div>
+                    <div class="stat-label">Total Detections</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">👤</div>
+                <div class="stat-content">
+                    <div class="stat-value" id="statUnique">0</div>
+                    <div class="stat-label">Unique Persons</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">❓</div>
+                <div class="stat-content">
+                    <div class="stat-value" id="statUnknown">0</div>
+                    <div class="stat-label">Unknown Faces</div>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon">⏱️</div>
+                <div class="stat-content">
+                    <div class="stat-value" id="statUptime">0s</div>
+                    <div class="stat-label">Uptime</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ─── Main Grid ──────────────────────────────────── -->
+        <div class="main-grid">
+
+            <!-- Video Feed -->
+            <div class="video-panel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        <span class="dot"></span>
+                        Live Camera Feed
+                    </div>
+                    <span class="panel-badge" id="fpsBadge">0 FPS</span>
+                </div>
+                <div class="video-container">
+                    <img id="videoFeed" src="/video_feed" alt="Live Camera Feed">
+                    <div class="video-overlay">
+                        <div class="video-overlay-left">
+                            <span class="fps-badge" id="fpsOverlay">0 FPS</span>
+                        </div>
+                        <span class="timestamp" id="timestamp"></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recognition Logs -->
+            <div class="log-panel">
+                <div class="panel-header">
+                    <div class="panel-title">
+                        📋 Recognition Logs
+                    </div>
+                    <span class="panel-badge" id="logCount">0 events</span>
+                </div>
+                <div class="log-list" id="logList">
+                    <div class="empty-state">
+                        <div class="empty-state-icon">📷</div>
+                        <div class="empty-state-text">
+                            Waiting for face detections...<br>
+                            <small>Logs will appear here in real-time</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+
+        <!-- ─── Activity Chart ─────────────────────────────── -->
+        <div class="activity-section">
+            <div class="panel-header">
+                <div class="panel-title">
+                    📈 Detection Activity (Last 30 min)
+                </div>
+            </div>
+            <div class="activity-chart" id="activityChart">
+                <div class="empty-state" style="width: 100%;">
+                    <div class="empty-state-icon">📈</div>
+                    <div class="empty-state-text">Activity data will appear here</div>
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <script>
+        // ═══════════════════════════════════════════════════
+        // Dashboard JavaScript — Auto-refresh Engine
+        // ═══════════════════════════════════════════════════
+
+        const REFRESH_INTERVAL = 2000; // 2 seconds
+        let previousLogIds = new Set();
+
+        // ─── Format Helpers ─────────────────────────────────
+        function formatUptime(seconds) {
+            if (seconds < 60) return Math.floor(seconds) + 's';
+            if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + Math.floor(seconds % 60) + 's';
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            return h + 'h ' + m + 'm';
+        }
+
+        function formatTime(timestamp) {
+            if (!timestamp) return '';
+            const parts = timestamp.split(' ');
+            if (parts.length >= 2) return parts[1];
+            return timestamp;
+        }
+
+        function confidenceClass(conf) {
+            if (conf >= 0.6) return 'high';
+            if (conf >= 0.4) return 'medium';
+            return 'low';
+        }
+
+        function getInitials(name) {
+            if (name === 'Unknown') return '?';
+            return name.split(' ').map(w => w[0]).join('').substring(0, 2).toUpperCase();
+        }
+
+        // ─── Update Stats ───────────────────────────────────
+        async function updateStats() {
+            try {
+                const res = await fetch('/api/stats');
+                const data = await res.json();
+
+                animateValue('statTotal', data.total_detections);
+                animateValue('statUnique', data.unique_persons);
+                animateValue('statUnknown', data.unknown_detections);
+                document.getElementById('statUptime').textContent = formatUptime(data.uptime);
+
+                const fps = data.fps || 0;
+                document.getElementById('fpsBadge').textContent = fps.toFixed(1) + ' FPS';
+                document.getElementById('fpsOverlay').textContent = fps.toFixed(1) + ' FPS';
+
+                // Update activity chart
+                if (data.recent_activity && data.recent_activity.length > 0) {
+                    renderActivityChart(data.recent_activity);
+                }
+            } catch (e) {
+                console.warn('Stats fetch failed:', e);
+            }
+        }
+
+        function animateValue(elementId, newValue) {
+            const el = document.getElementById(elementId);
+            const current = parseInt(el.textContent) || 0;
+            if (current !== newValue) {
+                el.textContent = newValue;
+                el.style.transform = 'scale(1.15)';
+                el.style.transition = 'transform 0.2s ease';
+                setTimeout(() => {
+                    el.style.transform = 'scale(1)';
+                }, 200);
+            }
+        }
+
+        // ─── Update Logs ────────────────────────────────────
+        async function updateLogs() {
+            try {
+                const res = await fetch('/api/logs');
+                const logs = await res.json();
+
+                const logList = document.getElementById('logList');
+                const logCount = document.getElementById('logCount');
+                logCount.textContent = logs.length + ' events';
+
+                if (logs.length === 0) {
+                    logList.innerHTML = `
+                        <div class="empty-state">
+                            <div class="empty-state-icon">📷</div>
+                            <div class="empty-state-text">
+                                Waiting for face detections...<br>
+                                <small>Logs will appear here in real-time</small>
+                            </div>
+                        </div>`;
+                    return;
+                }
+
+                // Build log items
+                const html = logs.slice(0, 50).map(log => {
+                    const isKnown = log.person_name !== 'Unknown';
+                    const avatarClass = isKnown ? 'known' : 'unknown';
+                    const initials = getInitials(log.person_name);
+                    const confClass = confidenceClass(log.confidence);
+                    const isNew = !previousLogIds.has(log.id);
+
+                    return `
+                        <div class="log-item" ${isNew ? 'style="animation: logSlideIn 0.3s ease-out"' : ''}>
+                            <div class="log-avatar ${avatarClass}">${initials}</div>
+                            <div class="log-details">
+                                <div class="log-name">${escapeHtml(log.person_name)}</div>
+                                <div class="log-meta">
+                                    <span class="log-confidence ${confClass}">${(log.confidence * 100).toFixed(1)}%</span>
+                                    ${log.track_id ? `<span class="log-track">ID:${log.track_id}</span>` : ''}
+                                </div>
+                            </div>
+                            <span class="log-time">${formatTime(log.timestamp)}</span>
+                        </div>`;
+                }).join('');
+
+                logList.innerHTML = html;
+                previousLogIds = new Set(logs.map(l => l.id));
+            } catch (e) {
+                console.warn('Logs fetch failed:', e);
+            }
+        }
+
+        // ─── Activity Chart ─────────────────────────────────
+        function renderActivityChart(activity) {
+            const chart = document.getElementById('activityChart');
+            if (!activity.length) return;
+
+            const maxCount = Math.max(...activity.map(a => a.count), 1);
+
+            chart.innerHTML = activity.map(a => {
+                const heightPct = (a.count / maxCount) * 100;
+                return `
+                    <div class="chart-bar-wrapper">
+                        <div class="chart-bar" style="height: ${Math.max(heightPct, 3)}%" data-tooltip="${a.count} detection(s)"></div>
+                        <span class="chart-bar-label">${a.minute}</span>
+                    </div>`;
+            }).join('');
+        }
+
+        // ─── Security: escape HTML ──────────────────────────
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        // ─── Timestamp ──────────────────────────────────────
+        function updateTimestamp() {
+            const now = new Date();
+            const ts = now.toLocaleTimeString('en-US', { hour12: false });
+            const dateStr = now.toLocaleDateString('en-US', {
+                year: 'numeric', month: 'short', day: 'numeric'
+            });
+            document.getElementById('timestamp').textContent = dateStr + ' ' + ts;
+        }
+
+        // ─── Button Handlers ────────────────────────────────
+        document.getElementById('btnRefresh').addEventListener('click', () => {
+            updateStats();
+            updateLogs();
+        });
+
+        document.getElementById('btnClear').addEventListener('click', async () => {
+            if (confirm('Clear all recognition logs?')) {
+                try {
+                    await fetch('/api/clear_logs', { method: 'POST' });
+                    previousLogIds.clear();
+                    updateStats();
+                    updateLogs();
+                } catch (e) {
+                    console.error('Clear failed:', e);
+                }
+            }
+        });
+
+        // ─── Auto-refresh Loop ──────────────────────────────
+        function startAutoRefresh() {
+            updateStats();
+            updateLogs();
+            updateTimestamp();
+
+            setInterval(updateStats, REFRESH_INTERVAL);
+            setInterval(updateLogs, REFRESH_INTERVAL);
+            setInterval(updateTimestamp, 1000);
+        }
+
+        // Start on page load
+        document.addEventListener('DOMContentLoaded', startAutoRefresh);
+    </script>
+</body>
+</html>
