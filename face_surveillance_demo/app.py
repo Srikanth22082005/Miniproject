@@ -1,22 +1,26 @@
 """
-Flask Web Dashboard for Face Surveillance System.
-Provides live video feed, recognition logs, and statistics.
+Flask API Server for Face Attendance System.
+Provides face streaming, analytics endpoints, and student CRUD operations for React frontend.
 """
 
 import os
 import sys
 import time
 import threading
-from flask import Flask, render_template, Response, jsonify
+from flask import Flask, Response, jsonify, request
+from flask_cors import CORS
 
 # Add project root to path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-from database import init_db, get_recent_logs, get_stats, clear_logs
+from database import init_db, get_analytics, get_all_students, get_student_insights, get_entry_exit_logs
 from recognize import FaceRecognizer
 
 app = Flask(__name__)
+# Enable CORS for React dev server (e.g., port 5173)
+CORS(app)
+
 engine = FaceRecognizer()
 
 
@@ -30,58 +34,92 @@ def start_engine():
 
 
 def generate_frames():
-    """Generator for MJPEG video stream."""
+    """Generator for MJPEG video stream — event-driven, zero artificial delay."""
     while True:
+        # Wait up to 100ms for a new frame (event-driven, no busy-loop)
+        engine._jpeg_event.wait(timeout=0.1)
+        engine._jpeg_event.clear()
+
         frame_bytes = engine.get_frame_jpeg()
         if frame_bytes is None:
-            time.sleep(0.05)
             continue
         yield (
             b"--frame\r\n"
             b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
         )
-        time.sleep(0.033)  # ~30 FPS cap
 
 
-# ─── Routes ───────────────────────────────────────────────────
+# ─── API Routes ───────────────────────────────────────────────────
 
-@app.route("/")
-def index():
-    """Main dashboard page."""
-    return render_template("index.html")
-
+@app.route("/api/status")
+def status():
+    return jsonify({
+        "status": "running",
+        "uptime": round(engine.get_uptime(), 1) if engine.running else 0,
+        "fps": round(engine.fps, 1)
+    })
 
 @app.route("/video_feed")
 def video_feed():
     """MJPEG video stream endpoint."""
-    return Response(
+    resp = Response(
         generate_frames(),
         mimetype="multipart/x-mixed-replace; boundary=frame",
     )
+    # Disable all buffering for real-time streaming
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    return resp
 
+@app.route("/api/analytics")
+def api_analytics():
+    """Get analytics data."""
+    try:
+        data = get_analytics()
+        # Add entry/exit logs 
+        data["entryExitLogs"] = get_entry_exit_logs()
+        # Add insights
+        data["insights"] = get_student_insights()
+        return jsonify(data)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-@app.route("/api/logs")
-def api_logs():
-    """Get recent recognition logs as JSON."""
-    logs = get_recent_logs(limit=100)
+@app.route("/api/students", methods=["GET"])
+def api_students():
+    """Get all students."""
+    try:
+        students = get_all_students()
+        return jsonify(students)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/unknown_faces", methods=["GET"])
+def api_unknown_faces():
+    """Get unknown faces logs from db."""
+    from database import get_connection
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("SELECT * FROM unknown_faces ORDER BY id DESC")
+    faces = [dict(row) for row in c.fetchall()]
+    conn.close()
+    return jsonify(faces)
+
+@app.route("/api/attendance", methods=["GET"])
+def api_attendance():
+    """Get attendance logs."""
+    from database import get_connection
+    conn = get_connection()
+    c = conn.cursor()
+    c.execute("""
+        SELECT a.id, a.date, a.time, a.status, s.name, s.student_id, s.department
+        FROM attendance a
+        JOIN students s ON a.student_id = s.student_id
+        ORDER BY a.date DESC, a.time DESC
+    """)
+    logs = [dict(row) for row in c.fetchall()]
+    conn.close()
     return jsonify(logs)
-
-
-@app.route("/api/stats")
-def api_stats():
-    """Get recognition statistics as JSON."""
-    stats = get_stats()
-    stats["uptime"] = round(engine.get_uptime(), 1)
-    stats["fps"] = round(engine.fps, 1)
-    return jsonify(stats)
-
-
-@app.route("/api/clear_logs", methods=["POST"])
-def api_clear_logs():
-    """Clear all recognition logs."""
-    clear_logs()
-    return jsonify({"status": "ok", "message": "Logs cleared."})
-
 
 # ─── Main ─────────────────────────────────────────────────────
 
@@ -89,8 +127,7 @@ if __name__ == "__main__":
     init_db()
     start_engine()
     print("\n" + "=" * 55)
-    print("  🎯 Face Surveillance Dashboard")
-    print("  Open: http://localhost:5000")
-    print("  Press Ctrl+C to stop.")
+    print("  🎯 Face Attendance System API")
+    print("  Running on: http://localhost:5000")
     print("=" * 55 + "\n")
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
