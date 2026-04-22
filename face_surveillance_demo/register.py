@@ -13,6 +13,10 @@ import os
 import sys
 import pickle
 import numpy as np
+
+# Fix M1 Mac Segmentation Fault (Import PyTorch/YOLO BEFORE cv2 to prevent BLAS library conflicts)
+import torch
+from ultralytics import YOLO
 import cv2
 
 # ── Paths ────────────────────────────────────────────────────────────────────

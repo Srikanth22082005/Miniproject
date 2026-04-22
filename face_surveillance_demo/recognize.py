@@ -23,6 +23,10 @@ import pickle
 import threading
 from collections import deque
 import numpy as np
+
+# Fix M1 Mac Segmentation Fault (Import PyTorch/YOLO BEFORE cv2 to prevent BLAS library conflicts)
+import torch
+from ultralytics import YOLO
 import cv2
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
